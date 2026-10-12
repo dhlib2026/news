@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- v4 화면 수정본: 기존 v3 서버와 함께 사용합니다. 이번 교체에는 setup/서버 재배포가 필요 없습니다.
+<!-- v4 화면 수정본: 기존 v3 서버와 함께 사용합니다. POST 연결 수정본: 동봉 Code.gs 교체 후 기존 배포를 새 버전으로 업데이트하세요. setup 재실행 불필요.
 상단 GOOGLE_SCRIPT_URL에 기존 배포 URL을 입력하고 GitHub의 index.html을 교체하세요.
 사진 필수 확인은 화면에서 수행합니다. 서버 API 자체의 사진 필수 정책은 변경하지 않습니다. -->
 <html lang="ko">
@@ -8,7 +8,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script>
 /* v4.0 · 입력 화면 정리 및 최종 제출 2단계
-   적용: 기존 배포 URL 입력 → 이 파일을 index.html로 교체. 서버 수정/재배포 및 setup 불필요.
+   적용: 기존 배포 URL 입력 → 이 파일을 index.html로 교체. 동봉 Code.gs 교체 및 기존 배포 새 버전 업데이트 필요. setup 재실행 불필요.
    설정 B:E 공통 부서, W열 학기별 부제목. 이미 발행한 문서는 그대로 보존됩니다.
    신규 부서 변경은 입력값·사진 모두 초기화, 기존 기록 부서 수정은 내용을 유지합니다.
    관리자 계정 변경 항목은 설정 화면에 없습니다. Google 시트 설정 G:I에서만 수정합니다.
@@ -120,18 +120,33 @@ const photoCache=new Map();
 function toast(s){$('toast').textContent=s;show('toast');clearTimeout(toastTimer);toastTimer=setTimeout(()=>show('toast',false),5500);}
 function errorAt(id,e){$(id).textContent=e.message||String(e);show(id);}
 async function busy(button,fn){const btn=typeof button==='string'?$(button):button;if(btn?.disabled)return;const label=btn?.textContent;if(btn){btn.disabled=true;btn.textContent='처리 중…';}try{return await fn();}catch(e){toast(e.message||String(e));}finally{if(btn){btn.disabled=false;if(btn.textContent==='처리 중…')btn.textContent=label;}}}
-// CORS 우회용 무응답 fetch/JSONP를 쓰지 않고, Google HTML Service 안에서 google.script.run을 호출합니다.
-let bridgePromise,bridgeWindow,bridgeOrigin,channel=randomKey(),sequence=0;const pending=new Map();
+// POST 전송: 연결 준비 신호 없이 각 요청을 독립된 숨김 창으로 보냅니다.
+const pending=new Map();
 function scriptURL(){let u=GOOGLE_SCRIPT_URL.trim();if(/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(u))return u;if(/^[A-Za-z0-9_-]{30,}$/.test(u))return 'https://script.google.com/macros/s/'+u+'/exec';throw Error('index.html 상단 GOOGLE_SCRIPT_URL에 /exec 배포 URL 또는 배포 ID를 입력하세요.');}
-function bridge(){if(bridgePromise)return bridgePromise;bridgePromise=new Promise((resolve,reject)=>{
- let url;try{url=scriptURL();}catch(e){reject(e);return;}
- const timer=setTimeout(()=>reject(Error('Google 서버 연결 시간이 초과됐습니다. 배포 접근 권한과 GitHub Pages 주소 설정을 확인하세요.')),45000);
- const listener=e=>{const m=e.data;if(!m||m.channel!==channel)return;const allowed=/^https:\/\/(?:[a-z0-9-]+-script\.googleusercontent\.com|script\.googleusercontent\.com|script\.google\.com)$/.test(e.origin);if(!allowed)return;
- if(m.kind==='news-ready'&&!bridgeWindow){bridgeWindow=e.source;bridgeOrigin=e.origin;clearTimeout(timer);resolve();}
- else if(m.kind==='news-response'&&e.source===bridgeWindow&&e.origin===bridgeOrigin){const q=pending.get(m.id);if(!q)return;clearTimeout(q.timer);pending.delete(m.id);m.result?.ok?q.resolve(m.result.data):q.reject(Error(m.result?.error||'서버 응답 오류'));}};
- window.addEventListener('message',listener);const iframe=document.createElement('iframe');iframe.hidden=true;iframe.title='Google 서버 연결';iframe.src=url+'?channel='+channel;document.body.appendChild(iframe);
- });return bridgePromise;}
-async function rpc(action,payload={}){await bridge();return new Promise((resolve,reject)=>{const id=String(++sequence),timer=setTimeout(()=>{pending.delete(id);reject(Error('응답이 늦습니다. 저장·발행 결과를 먼저 조회한 뒤 다시 시도하세요.'));},120000);pending.set(id,{resolve,reject,timer});bridgeWindow.postMessage({kind:'news-request',channel,id,action,payload},bridgeOrigin);});}
+
+function rpc(action,payload={}){
+ return new Promise((resolve,reject)=>{
+  let url;try{url=scriptURL();}catch(e){reject(e);return;}
+  const id=randomKey(32),frame=document.createElement('iframe'),form=document.createElement('form');
+  frame.name='news_request_'+id;frame.hidden=true;frame.title='Google 자료 요청';
+  form.method='POST';form.action=url;form.target=frame.name;form.hidden=true;
+  const input=document.createElement('input');input.type='hidden';input.name='payload';
+  input.value=JSON.stringify({id,origin:location.origin,action,payload});form.append(input);
+  let timer;
+  function cleanup(){clearTimeout(timer);pending.delete(id);form.remove();frame.remove();}
+  pending.set(id,{resolve:data=>{cleanup();resolve(data);},reject:error=>{cleanup();reject(error);}});
+  timer=setTimeout(()=>{cleanup();reject(Error(action==='bootstrap'?'초기 자료 응답 시간이 초과됐습니다. 서버 배포 버전·접근 권한과 학교망의 차단 기록을 확인하세요.':'응답 시간이 초과됐습니다. 저장·발행은 완료됐을 수 있으므로 결과를 조회한 뒤 다시 시도하세요.'));},180000);
+  try{document.body.append(frame,form);form.submit();}catch(e){cleanup();reject(e);}
+ });
+}
+window.addEventListener('message',e=>{
+ const allowed=/^https:\/\/(?:[a-z0-9-]+-script\.googleusercontent\.com|script\.googleusercontent\.com|script\.google\.com)$/.test(e.origin);
+ if(!allowed)return;
+ const m=e.data;if(!m||m.channel!=='school-news-post-v1'||!pending.has(m.id))return;
+ const q=pending.get(m.id);
+ if(m.result&&m.result.ok===true)q.resolve(m.result.data);
+ else q.reject(Error(m.result?.error||'서버 응답 오류'));
+});
 function auth(p={}){return Object.assign({browserKey},p,adminToken?{token:adminToken}:{});}
 function saveToken(token){adminToken=token;try{if(token)sessionStorage.setItem('schoolNewsAdmin',token);else sessionStorage.removeItem('schoolNewsAdmin');}catch(e){}}
 function options(el,list,current,first){el.innerHTML=(first?'<option value="">'+esc(first)+'</option>':'')+list.map(x=>'<option value="'+esc(x.id)+'">'+esc(x.label||x.name)+'</option>').join('');if(list.some(x=>x.id===current)||first&&current==='')el.value=current;}
